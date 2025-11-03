@@ -2,7 +2,7 @@
 
 **Materia:** Fundamentos y Bases de Datos Relacionales  
 **Programa:** Ingeniería de Software – FESC  
-**Estudiantes:** Natalia Salcedo Ortega, Joise David Cuberos 
+**Estudiantes:** Natalia Salcedo Ortega, Jose David Cuberos 
 **Año:** 2025  
 
 ---
