@@ -1,0 +1,155 @@
+CREATE SCHEMA IF NOT EXISTS acad;
+SET search_path = acad, public;
+
+CREATE TABLE department (
+  department_id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  office TEXT
+);
+
+CREATE TABLE teacher (
+  teacher_id SERIAL PRIMARY KEY,
+  first_name TEXT NOT NULL,
+  last_name TEXT NOT NULL,
+  email TEXT UNIQUE,
+  dept_id INT REFERENCES department(department_id) ON DELETE SET NULL
+);
+
+CREATE TABLE student (
+  student_id SERIAL PRIMARY KEY,
+  first_name TEXT NOT NULL,
+  last_name TEXT NOT NULL,
+  email TEXT UNIQUE,
+  enrollment_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  dept_id INT REFERENCES department(department_id) ON DELETE SET NULL
+);
+
+CREATE TABLE course (
+  course_id SERIAL PRIMARY KEY,
+  code TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  credits SMALLINT NOT NULL CHECK (credits > 0 AND credits <= 10),
+  capacity INT NOT NULL CHECK (capacity >= 0),
+  dept_id INT REFERENCES department(department_id) ON DELETE SET NULL,
+  teacher_id INT REFERENCES teacher(teacher_id) ON DELETE SET NULL
+);
+
+CREATE TABLE enrollment (
+  enrollment_id SERIAL PRIMARY KEY,
+  student_id INT NOT NULL REFERENCES student(student_id) ON DELETE CASCADE,
+  course_id  INT NOT NULL REFERENCES course(course_id) ON DELETE CASCADE,
+  enrolled_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  status TEXT NOT NULL CHECK (status IN ('enrolled','dropped','completed')),
+  UNIQUE (student_id, course_id)
+);
+
+CREATE TABLE grade (
+  grade_id SERIAL PRIMARY KEY,
+  enrollment_id INT NOT NULL UNIQUE REFERENCES enrollment(enrollment_id) ON DELETE CASCADE,
+  grade NUMERIC(5,2) CHECK (grade >= 0 AND grade <= 5),
+  graded_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE OR REPLACE FUNCTION fn_check_capacity()
+RETURNS TRIGGER AS $$
+DECLARE
+  current_count INT;
+  cap INT;
+BEGIN
+  SELECT count(*) INTO current_count FROM enrollment
+  WHERE course_id = NEW.course_id AND status = 'enrolled';
+  SELECT capacity INTO cap FROM course WHERE course_id = NEW.course_id;
+
+  IF current_count >= cap THEN
+    RAISE EXCEPTION 'Cannot enroll: course % is full (capacity=%).', NEW.course_id, cap;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_check_capacity
+BEFORE INSERT ON enrollment
+FOR EACH ROW EXECUTE FUNCTION fn_check_capacity();
+
+CREATE OR REPLACE FUNCTION fn_grade_sets_completed()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF (SELECT status FROM enrollment WHERE enrollment_id = NEW.enrollment_id) = 'dropped' THEN
+    RAISE EXCEPTION 'Cannot grade a dropped enrollment (enrollment_id=%).', NEW.enrollment_id;
+  END IF;
+  UPDATE enrollment SET status = 'completed' WHERE enrollment_id = NEW.enrollment_id;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_grade_completed
+AFTER INSERT ON grade
+FOR EACH ROW EXECUTE FUNCTION fn_grade_sets_completed();
+
+INSERT INTO department (name, office) VALUES
+('Computer Science', 'B101'),
+('Mathematics', 'A202');
+
+INSERT INTO teacher (first_name,last_name,email,dept_id) VALUES
+('Laura','Martinez','laura@uni.edu',1),
+('Carlos','Rojas','carlos@uni.edu',2);
+
+INSERT INTO student (first_name,last_name,email,dept_id) VALUES
+('Ana','Perez','ana@uni.edu',1),
+('Luis','Gomez','luis@uni.edu',1),
+('Maria','Torres','maria@uni.edu',2),
+('Sofia','Diaz','sofia@uni.edu',2);
+
+INSERT INTO course (code,title,credits,capacity,dept_id,teacher_id) VALUES
+('CS101','Intro to Databases',3,2,1,1),
+('MA201','Advanced Math',4,3,2,2);
+
+INSERT INTO enrollment (student_id,course_id,status) VALUES
+(1,1,'enrolled'),
+(2,1,'enrolled'),
+(3,2,'enrolled');
+
+INSERT INTO grade (enrollment_id,grade) VALUES
+(1,4.5),
+(2,3.8),
+(3,4.0);
+
+-- 1. Top 5 de estudiantes con mayor promedio
+WITH student_avg AS (
+  SELECT s.student_id, s.first_name, s.last_name, AVG(g.grade)::numeric(5,2) AS avg_grade
+  FROM student s
+  JOIN enrollment e ON s.student_id = e.student_id
+  JOIN grade g ON e.enrollment_id = g.enrollment_id
+  GROUP BY s.student_id, s.first_name, s.last_name
+),
+ranked AS (
+  SELECT *, ROW_NUMBER() OVER (ORDER BY avg_grade DESC) AS rn FROM student_avg
+)
+SELECT * FROM ranked WHERE rn <= 5;
+
+-- 2. Clasificación de notas por asignatura
+WITH course_grades AS (
+  SELECT c.course_id, c.title, s.first_name, s.last_name, g.grade
+  FROM course c
+  JOIN enrollment e ON c.course_id = e.course_id
+  JOIN grade g ON e.enrollment_id = g.enrollment_id
+  JOIN student s ON e.student_id = s.student_id
+),
+stats AS (
+  SELECT *, AVG(grade) OVER (PARTITION BY course_id) AS course_avg,
+         RANK() OVER (PARTITION BY course_id ORDER BY grade DESC) AS pos
+  FROM course_grades
+)
+SELECT * FROM stats ORDER BY course_id, pos;
+
+-- 3.Porcentaje de abandonos por curso
+WITH per_course AS (
+  SELECT c.course_id, c.title,
+         COUNT(*) FILTER (WHERE e.status='dropped') AS dropped,
+         COUNT(*) AS total
+  FROM course c LEFT JOIN enrollment e ON c.course_id = e.course_id
+  GROUP BY c.course_id, c.title
+)
+SELECT course_id,title,ROUND((dropped::numeric/NULLIF(total,0))*100,2) AS drop_pct
+FROM per_course;
